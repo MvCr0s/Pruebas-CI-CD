@@ -1,50 +1,84 @@
-name: Pipeline CI/CD Completo
+name: Pipeline Profesional (Calidad + Seguridad + CD)
 
+# AHORA EL CD SOLO SALTA CON ETIQUETAS (v1.0, v1.1...)
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"] # Al hacer push normal, SOLO CI
+    tags: ["v*.*.*"] # Al crear un tag (v1.0.0), CI + CD
+  pull_request:
+    branches: ["main"]
 
 jobs:
-  # TRABAJO 1: INTEGRACIÓN CONTINUA (CI)
-  test:
+  # --- FASE 1: CALIDAD DEL CÓDIGO (CI) ---
+  code-quality:
     runs-on: ubuntu-latest
     steps:
-    - name: Descargar código
-      uses: actions/checkout@v3
+      - uses: actions/checkout@v3
+      - name: Configurar Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
 
-    - name: Configurar Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
+      - name: Instalar dependencias
+        run: |
+          pip install flake8
+          pip install -r app/requirements.txt
 
-    - name: Instalar dependencias
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r app/requirements.txt
+      # NOVEDAD 1: El Linter
+      - name: Analizar código con Flake8
+        run: |
+          # stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # exit-zero treats all errors as warnings.
+          flake8 . --count --exit-zero --max-complexity=10 --statistics
 
-    - name: Ejecutar Tests (Pytest)
-      run: |
-        # Esto buscará archivos que empiecen por test_ y verificará que todo funciona
-        python -m pytest
-
-  # TRABAJO 2: DESPLIEGUE CONTINUO (CD)
-  build-and-push:
-    needs: test  # IMPORTANTE: Esto solo arranca si 'test' sale VERDE
+  # --- FASE 2: TESTS FUNCIONALES (CI) ---
+  tests:
+    needs: code-quality # Primero calidad, luego funcionalidad
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar código
-        uses: actions/checkout@v3
-      
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+      - run: pip install -r app/requirements.txt
+      - name: Ejecutar Pytest
+        run: python -m pytest
+
+  # --- FASE 3: SEGURIDAD Y CONSTRUCCIÓN (CI/CD) ---
+  security-and-build:
+    needs: tests # Solo si pasan los tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      # Construimos la imagen PERO NO la subimos todavía
+      - name: Construir imagen para escanear
+        run: docker build . -t mi-imagen-local:test
+
+      # NOVEDAD 2: Escáner de vulnerabilidades Trivy
+      - name: Escanear imagen buscando vulnerabilidades críticas
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "mi-imagen-local:test"
+          format: "table"
+          exit-code: "1" # Si encuentra algo crítico, FALLA y cancela todo
+          ignore-unfixed: true # Ignora fallos que no tienen solución conocida
+          severity: "CRITICAL,HIGH"
+
+      # NOVEDAD 3: Login y Subida (Solo si es un Release)
       - name: Login en Docker Hub
+        if: startsWith(github.ref, 'refs/tags/v') # CONDICIONAL: Solo si hay tag
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-      
-      - name: Construir y Subir imagen Docker
+
+      - name: Construir y Subir (Release)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          # Aquí se guardará como usuario/repo:etiqueta
-          tags: ${{ secrets.DOCKER_USERNAME }}/gamemood-tfg:latest
+          # Usa el nombre del tag como versión (ej: mvcr0s/app:v1.0.0)
+          tags: ${{ secrets.DOCKER_USERNAME }}/gamemood-tfg:${{ github.ref_name }}
